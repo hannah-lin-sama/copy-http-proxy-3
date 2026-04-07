@@ -20,6 +20,11 @@ import type { NormalizedServerOptions, NormalizeProxyTarget, ProxyServer, ProxyT
 const log = debug("http-proxy-3:ws-incoming");
 const web_o = Object.values(OUTGOING_PASSES);
 
+/**
+ * 创建一个 WebSocket 连接计数器函数
+ * @param name 计数器的名称，用于日志记录
+ * @returns 计数器函数
+ */
 function createSocketCounter(name: string) {
   let sockets = new Set<number>();
   return ({
@@ -29,6 +34,7 @@ function createSocketCounter(name: string) {
     add?: Socket & { id?: number };
     rm?: Socket & { id?: number };
   } = {}) => {
+    // 添加 socket
     if (add) {
       if (!add.id) {
         add.id = Math.random();
@@ -37,6 +43,7 @@ function createSocketCounter(name: string) {
         sockets.add(add.id);
       }
     }
+    // 移除 socket
     if (rm) {
       if (!rm.id) {
         rm.id = Math.random();
@@ -77,22 +84,36 @@ class MockResponse implements EditableResponse {
   };
 }
 
+/**
+ * 是统计当前打开的 WebSocket 连接总数，包括客户端 socket 和代理服务器 socket
+ * @returns 总的打开连接数
+ */
 export function numOpenSockets(): number {
+  // 调用 socketCounter() 获取当前客户端 socket 数量
+  // 调用 proxySocketCounter() 获取当前代理服务器 socket 数量
   return socketCounter() + proxySocketCounter();
 }
 
 // WebSocket requests must have the `GET` method and
 // the `upgrade:websocket` header
+/**
+ * 验证 WebSocket 连接请求的合法性
+ * @param req 
+ * @param socket 
+ * @returns 
+ */
 export function checkMethodAndHeader(
   req: Request,
   socket: Socket,
 ): true | undefined {
   log("websocket: checkMethodAndHeader");
+  // 请求方法非get或没有upgrade头
   if (req.method !== "GET" || !req.headers.upgrade) {
     socket.destroy();
     return true;
   }
 
+  // upgrade头非websocket
   if (req.headers.upgrade.toLowerCase() !== "websocket") {
     socket.destroy();
     return true;
@@ -100,16 +121,25 @@ export function checkMethodAndHeader(
 }
 
 // Sets `x-forwarded-*` headers if specified in config.
+/**
+ * 设置 WebSocket 请求的 `x-forwarded-*` 头
+ * @param req WebSocket 请求对象
+ * @param _socket 未使用的 socket 对象
+ * @param options 代理服务器选项
+ */
 export function XHeaders(req: Request, _socket: Socket, options: NormalizedServerOptions) {
   if (!options.xfwd) return;
   log("websocket: XHeaders");
 
   const values = {
+    // 获取原始客户端 IP 地址
     for: req.connection.remoteAddress || req.socket.remoteAddress,
-    port: common.getPort(req),
+    port: common.getPort(req), // 获取原始请求端口
+    // 根据连接是否加密确定 WebSocket 协议（加密为 "wss"，非加密为 "ws"）
     proto: common.hasEncryptedConnection(req) ? "wss" : "ws",
   };
 
+  // 添加/修改 X-Forwarded-* 头
   for (const header of ["for", "port", "proto"] as const) {
     req.headers["x-forwarded-" + header] =
       (req.headers["x-forwarded-" + header] || "") +
@@ -120,6 +150,16 @@ export function XHeaders(req: Request, _socket: Socket, options: NormalizedServe
 
 // Do the actual proxying. Make the request and upgrade it.
 // Send the Switching Protocols request and pipe the sockets.
+/**
+ * 负责建立和管理 WebSocket 连接的代理转发。
+ * 它处理从客户端到目标服务器的 WebSocket 连接，包括连接建立、数据传输和错误处理等完整流程
+ * @param req  // 客户端 HTTP 请求对象（包含 Upgrade 头）
+ * @param socket // 底层 TCP socket（已建立连接）
+ * @param options // 代理配置（含 target、forward、ws 等）
+ * @param head 
+ * @param server  // ProxyServer 实例，用于触发事件
+ * @param cb 
+ */
 export function stream(
   req: Request,
   socket: Socket,
@@ -129,13 +169,17 @@ export function stream(
   cb?: Function,
 ) {
   log("websocket: new stream");
+  // 代理端socket
   const proxySockets: Socket[] = [];
+  // 计数客户端socket
   socketCounter({ add: socket });
+  // 清理代理端socket
   const cleanUpProxySockets = () => {
     for (const p of proxySockets) {
       p.end();
     }
   };
+  // 当客户端socket关闭时，清理代理端socket
   socket.on("close", () => {
     socketCounter({ rm: socket });
     cleanUpProxySockets();
@@ -146,6 +190,7 @@ export function stream(
   // EHOSTUNREACH). We need to do that explicitly.
   socket.on("error", cleanUpProxySockets);
 
+  // 构造 HTTP 响应头
   const createHttpHeader = (line: string, headers: http.IncomingHttpHeaders) => {
     return (
       Object.keys(headers)
@@ -176,12 +221,16 @@ export function stream(
   }
 
   // @ts-expect-error FIXME: options.target may be undefined
+  // 选择协议模块
   const proto = common.isSSL.test(options.target.protocol) ? https : http;
-
+  // 构造请求选项 
   const outgoingOptions = common.setupOutgoing(options.ssl || {}, options, req);
+  // 发送请求
   const proxyReq = proto.request(outgoingOptions);
 
   // Enable developers to modify the proxyReq before headers are sent
+  // 触发 proxyReqWs 事件
+  // 允许开发人员在发送请求前修改请求对象
   if (server) {
     server.emit("proxyReqWs", proxyReq, req, socket, options, head);
   }
@@ -189,6 +238,7 @@ export function stream(
   // Error Handler
   proxyReq.on("error", onOutgoingError);
 
+  // 处理目标服务器的 upgrade 事件（成功升级）
   proxyReq.on(
     "upgrade",
     (proxyRes: Request, proxySocket: Socket, proxyHead: Buffer) => {
@@ -244,6 +294,7 @@ export function stream(
 
   // if we get a response, backend is not a websocket endpoint,
   // relay HTTP response and close the socket
+  // 处理目标服务器的 response 事件（后端不支持 WebSocket）
   proxyReq.on("response", (proxyRes: ProxyResponse) => {
     log("got non-ws HTTP response",
         {

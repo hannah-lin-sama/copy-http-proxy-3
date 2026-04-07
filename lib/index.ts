@@ -18,6 +18,7 @@ import type * as http from 'node:http';
 
 /**
  * Creates the proxy server.
+ * 用于创建并返回一个 HTTP 代理服务器实例
  *
  * Examples:
  *
